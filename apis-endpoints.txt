@@ -1,0 +1,23 @@
+# ELITE GATEWAY ENDPOINTS v2.0
+# Standard Gateways
+https://api.stripe.com/v1/charges
+https://api.braintreegateway.com/merchants/v1/transactions
+https://api.checkout.com/payments
+https://api.squareupsandbox.com/v2/payments
+
+# High-Success Rate (Tier 1)
+https://api.adyen.com/v1/payments
+https://api.worldpay.com/v1/orders
+https://api.authorize.net/xml/v1/request.api
+https://api.globalpay.com/v2/transactions
+
+# High-Success Rate (Tier 2)
+https://api.2checkout.com/v6.0/
+https://api.bluepay.com/interfaces/bp10emu
+https://api.payoneer.com/v4/accounts
+https://api.payflowpro.paypal.com
+
+# Crypto & Digital Wallets
+https://api.coinbase.com/v2/charges
+https://api.skrill.com/app/pay.pl
+https://api.neteller.com/v1/payments
