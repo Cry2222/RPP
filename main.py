@@ -20,8 +20,47 @@ def live():
 
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from faker import Faker
-from aiogram import Bot, Dispatcher
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputFile, Message, CallbackQuery
+from aiogram import Bot
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+
+try:
+    from aiogram.dispatcher import Dispatcher  # aiogram 2.x
+    from aiogram.types import InputFile
+    AIROGRAM_V3 = False
+except Exception:
+    from aiogram import Dispatcher  # aiogram 3.x
+    from aiogram.types import FSInputFile as InputFile
+    from aiogram.filters import Command
+    AIROGRAM_V3 = True
+
+
+def _enable_aiogram_v2_style_handlers(dp):
+    """Provide v2-style decorator compatibility on aiogram 3."""
+    if not AIROGRAM_V3:
+        return dp
+
+    if not hasattr(dp, 'message_handler'):
+        def message_handler(*, commands=None, content_types=None, **kwargs):
+            def decorator(func):
+                filters = []
+                if commands:
+                    filters.append(Command(commands))
+                dp.message.register(func, *filters)
+                return func
+            return decorator
+
+        dp.message_handler = message_handler
+
+    if not hasattr(dp, 'callback_query_handler'):
+        def callback_query_handler(*args, **kwargs):
+            def decorator(func):
+                dp.callback_query.register(func)
+                return func
+            return decorator
+
+        dp.callback_query_handler = callback_query_handler
+
+    return dp
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from proxy_scraper import full_scrape_and_scrub, auto_scrub_loop, get_scrub_stats, get_scrubbed_proxies, proxy_pool_monitor, get_live_count, remove_dead_proxy, get_proxy_latency, TARGET_LIVE, REFILL_THRESHOLD, MAX_WORKERS
@@ -5502,7 +5541,7 @@ async def main_loop():
         return
 
     bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher(bot)
+    dp = _enable_aiogram_v2_style_handlers(Dispatcher(bot))
     crawler = CCCrawler()
     crawler_instance = crawler
 
@@ -5644,7 +5683,10 @@ async def main_loop():
     max_poll_retries = 10
     for poll_attempt in range(max_poll_retries):
         try:
-            await dp.start_polling(reset_webhook=True, timeout=30, relax=0.5)
+            if AIROGRAM_V3:
+                await dp.start_polling(bot)
+            else:
+                await dp.start_polling(reset_webhook=True, timeout=30, relax=0.5)
             break
         except Exception as e:
             err_str = str(e).lower()
