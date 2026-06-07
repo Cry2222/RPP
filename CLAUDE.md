@@ -14,6 +14,8 @@ No `requirements.txt` exists. Install manually:
 pip install aiogram aiohttp requests flask beautifulsoup4 faker urllib3
 ```
 
+> The project is tested on Android Termux. See `SETUP.md` for the full Termux installation walkthrough.
+
 **Optional — js-recon (strongly recommended for gate auto-setup):**
 
 ```bash

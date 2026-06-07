@@ -687,7 +687,7 @@ class CCCrawler:
             parts = card_str.split('|')
             cc, mes, ano, cvv = parts[0], parts[1], parts[2], parts[3]
             from stripe import check_stripe
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             t0 = time.time()
             result = await loop.run_in_executor(None, check_stripe, cc, mes, ano, cvv)
             elapsed = time.time() - t0
@@ -717,7 +717,7 @@ class CCCrawler:
         try:
             parts = card_str.split('|')
             cc, mes, ano, cvv = parts[0], parts[1], parts[2], parts[3]
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             t0 = time.time()
             result = await loop.run_in_executor(None, check_braintree, cc, mes, ano, cvv)
             elapsed = time.time() - t0
@@ -746,7 +746,7 @@ class CCCrawler:
         try:
             parts = card_str.split('|')
             cc, mes, ano, cvv = parts[0], parts[1], parts[2], parts[3]
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             t0 = time.time()
             active_cfg = get_config(get_active_config_id())
             settings = active_cfg.get("settings", {}) if active_cfg else {}
@@ -775,7 +775,7 @@ class CCCrawler:
         try:
             parts = card_str.split('|')
             cc, mes, ano, cvv = parts[0], parts[1], parts[2], parts[3]
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             t0 = time.time()
             active_cfg = get_config(get_active_config_id())
             settings = active_cfg.get("settings", {}) if active_cfg else {}
@@ -804,7 +804,7 @@ class CCCrawler:
         try:
             parts = card_str.split('|')
             cc, mes, ano, cvv = parts[0], parts[1], parts[2], parts[3]
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             t0 = time.time()
             active_cfg = get_config(get_active_config_id())
             settings = active_cfg.get("settings", {}) if active_cfg else {}
@@ -2308,11 +2308,11 @@ def register_handlers(dp):
             else:
                 t0 = time.time()
                 if active_gt == "braintree":
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     result = await loop.run_in_executor(None, check_braintree, cc, mm, yy, cvv)
                 else:
                     from stripe import check_stripe as _chk
-                    loop = asyncio.get_event_loop()
+                    loop = asyncio.get_running_loop()
                     result = await loop.run_in_executor(None, _chk, cc, mm, yy, cvv)
                 check_time = time.time() - t0
                 status = result.get('status', 'declined')
@@ -2992,11 +2992,11 @@ def register_handlers(dp):
                         else:
                             t0 = time.time()
                             if gt == "braintree":
-                                loop = asyncio.get_event_loop()
+                                loop = asyncio.get_running_loop()
                                 result = await loop.run_in_executor(None, check_braintree, cc, mm, yy, cvv)
                             else:
                                 from stripe import check_stripe as _chk
-                                loop = asyncio.get_event_loop()
+                                loop = asyncio.get_running_loop()
                                 result = await loop.run_in_executor(None, _chk, cc, mm, yy, cvv)
                             check_time = time.time() - t0
                             status = result.get('status', 'declined')
@@ -3349,7 +3349,7 @@ def register_handlers(dp):
         )
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             diag = await loop.run_in_executor(None, diagnose_gate)
 
             checks = []
@@ -3459,7 +3459,7 @@ def register_handlers(dp):
             parse_mode='HTML'
         )
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             gate_info = await loop.run_in_executor(None, detect_gate_type, url_arg)
             detected_type = gate_info.get("gate_type", "stripe")
@@ -4898,7 +4898,7 @@ def register_handlers(dp):
         )
         prev_active = get_active_config_id()
         set_active_config(cid)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             gate_info = await loop.run_in_executor(None, detect_gate_type, url)
             detected_type = gate_info.get("gate_type", "stripe")
@@ -5026,7 +5026,7 @@ def register_handlers(dp):
         prev_active = get_active_config_id()
         set_active_config(cid)
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             diag = await loop.run_in_executor(None, diagnose_gate)
             checks = []
             checks.append(f"  {'✅' if diag['site_reachable'] else '❌'}  Site reachable")
@@ -5488,7 +5488,7 @@ async def checking_loop(bot, chat_id, crawler):
                 crawler._smart_gen_live_count += len(approved_batch)
                 if crawler._smart_gen_live_count >= 5:
                     try:
-                        loop = asyncio.get_event_loop()
+                        loop = asyncio.get_running_loop()
                         await loop.run_in_executor(None, retrain_smart_gen)
                         crawler._smart_gen_live_count = 0
                         logger.info("LSTM model retrained with new live cards")

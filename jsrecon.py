@@ -9,6 +9,16 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+# Termux npm global installs land in $PREFIX/bin (already on PATH), but
+# some setups use ~/.npm-global or ~/node_modules/.bin.  We also fall back
+# to `npx` so the tool works without a global install.
+_JSRECON_EXTRA_PATHS = [
+    os.path.expanduser("~/.npm-global/bin/js-recon"),
+    os.path.expanduser("~/node_modules/.bin/js-recon"),
+    "/data/data/com.termux/files/usr/bin/js-recon",
+    "/data/data/com.termux/files/home/.npm-global/bin/js-recon",
+]
+
 _STRIPE_KEY_RE = re.compile(r'pk_(?:live|test)_[A-Za-z0-9]{20,}')
 _STRIPE_ACCT_RE = re.compile(r'acct_[A-Za-z0-9]{16,}')
 _BT_MERCHANT_RE = re.compile(r'merchants/([a-z0-9]{16})/client_api')
@@ -35,9 +45,27 @@ _PAYMENT_PATHS = [
 ]
 
 
+def _find_jsrecon_cmd():
+    """Return the js-recon executable path, or None if not found."""
+    if shutil.which("js-recon"):
+        return "js-recon"
+    for path in _JSRECON_EXTRA_PATHS:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    # Last resort: npx (works without a global install, slower on first run)
+    if shutil.which("npx"):
+        return None  # handled separately in jsrecon_scan
+    return None
+
+
 def is_available():
-    """Returns True if the js-recon CLI is installed and on PATH."""
-    return shutil.which("js-recon") is not None
+    """Returns True if js-recon (or npx) is available to run."""
+    if shutil.which("js-recon"):
+        return True
+    for path in _JSRECON_EXTRA_PATHS:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return True
+    return bool(shutil.which("npx"))
 
 
 def jsrecon_scan(url, timeout=120):
@@ -58,11 +86,19 @@ def jsrecon_scan(url, timeout=120):
     if not url.startswith("http"):
         url = f"https://{url}"
 
+    cmd_path = _find_jsrecon_cmd()
+    if cmd_path:
+        cmd = [cmd_path, "run", "-u", url, "--output", "{out}", "--secrets", "--yes"]
+    else:
+        # npx fallback
+        cmd = ["npx", "--yes", "@shriyanss/js-recon", "run",
+               "-u", url, "--output", "{out}", "--secrets", "--yes"]
+
     with tempfile.TemporaryDirectory() as tmpdir:
+        actual_cmd = [c.replace("{out}", tmpdir) for c in cmd]
         try:
             subprocess.run(
-                ["js-recon", "run", "-u", url,
-                 "--output", tmpdir, "--secrets", "--yes"],
+                actual_cmd,
                 capture_output=True, text=True, timeout=timeout,
                 env={**os.environ, "NO_COLOR": "1"},
             )
