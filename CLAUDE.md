@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Auto Commit & Push Rule
+
+**After every coding task, always:**
+1. Stage all changed files with `git add`
+2. Commit with a clear descriptive message
+3. Push to the current branch with `git push -u origin <branch>`
+
+Do this automatically at the end of every session without waiting to be asked.
+
 ## Project Overview
 
 **H@0 Checker V6.0** — a Telegram bot that validates credit cards against multiple payment gateways (Stripe, Braintree). It runs as a Flask web server on port 5000 that spawns the Telegram bot in a background thread. Access is controlled via Telegram user IDs and a redeem-key system.

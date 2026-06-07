@@ -3,6 +3,7 @@ import json
 import logging
 import time
 import random
+import threading
 from urllib.parse import urlparse
 from config import get_proxy_dict, get_random_ua, get_gate_setting, fake, WC_ACCOUNT_PATHS, get_next_site, STRIPE_WC_SITE_POOL
 from stripe_common import (
@@ -17,6 +18,37 @@ from stripe_common import (
 logger = logging.getLogger(__name__)
 
 _rl = get_intent_rate_limiter()
+
+# ── path/key cache: skip probe loops on repeat checks of the same site ──────
+_intent_path_cache: dict = {}
+_intent_cache_lock = threading.Lock()
+_PATH_CACHE_TTL = 3600
+
+
+def _intent_cache_get(site_url):
+    with _intent_cache_lock:
+        e = _intent_path_cache.get(site_url)
+        if e and time.time() - e[2] < _PATH_CACHE_TTL:
+            return e[0], e[1]  # acct_path, pub_key
+        return None
+
+
+def _intent_cache_set(site_url, acct_path, pub_key):
+    with _intent_cache_lock:
+        _intent_path_cache[site_url] = (acct_path, pub_key, time.time())
+
+
+def _intent_cache_del(site_url):
+    with _intent_cache_lock:
+        _intent_path_cache.pop(site_url, None)
+
+
+def invalidate_intent_cache(site_url=None):
+    with _intent_cache_lock:
+        if site_url:
+            _intent_path_cache.pop(site_url, None)
+        else:
+            _intent_path_cache.clear()
 
 
 def check_stripe_intent(cc, mm, yy, cvv, site_url=None, pub_key=None):
@@ -82,6 +114,17 @@ def _do_intent_check(s, cc, mm, yy, cvv, site_url, pub_key):
     else:
         account_paths = list(WC_ACCOUNT_PATHS)
 
+    # Use cached paths to skip multi-path probe on repeat checks of the same site
+    _ic = _intent_cache_get(site_url)
+    if _ic:
+        _ic_acct, _ic_pk = _ic
+        if _ic_acct and _ic_acct not in account_paths:
+            account_paths = [_ic_acct] + account_paths
+        if not pub_key and _ic_pk:
+            pub_key = _ic_pk
+    else:
+        _ic_acct, _ic_pk = None, None
+
     _rl.wait_if_needed()
     resp = None
     acct_path = '/my-account/'
@@ -103,6 +146,7 @@ def _do_intent_check(s, cc, mm, yy, cvv, site_url, pub_key):
             return {**error_result(cc, mm, yy, cvv, "Rate Limited by site", gate_name), "_retry": True}
         elif status_code == 403:
             _rl.record_ban(180)
+            _intent_cache_del(site_url)
             return {**error_result(cc, mm, yy, cvv, "Blocked by site (403)", gate_name), "_retry": True}
         return {**error_result(cc, mm, yy, cvv, "Cannot reach site account page", gate_name), "_retry": True}
 
@@ -228,6 +272,8 @@ def _do_intent_check(s, cc, mm, yy, cvv, site_url, pub_key):
         return {**error_result(cc, mm, yy, cvv, "Setup intent secret not found", gate_name), "_retry": True}
 
     logger.info("Stripe Intent: setup intent obtained")
+    if not _ic_acct and final_key:  # first successful discovery — cache for future checks
+        _intent_cache_set(site_url, acct_path, final_key)
 
     page_interaction_delay(100)
 
