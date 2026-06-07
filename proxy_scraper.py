@@ -61,7 +61,7 @@ MAX_LATENCY_MS = 3000
 
 _scrubbed_proxies = []
 _proxy_latencies = {}
-_scrub_lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None
+_scrub_lock = None  # created lazily inside the event loop via _get_scrub_lock()
 _scrub_stats = {
     'total_scraped': 0,
     'total_live': 0,

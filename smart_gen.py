@@ -1,4 +1,3 @@
-import numpy as np
 import os
 import logging
 import random
@@ -6,6 +5,15 @@ import json
 import threading
 
 logger = logging.getLogger(__name__)
+
+try:
+    import numpy as np
+    _numpy_ok = True
+except ImportError:
+    np = None
+    _numpy_ok = False
+    logger.warning("numpy not installed — LSTM card generation disabled. "
+                   "Install with: pip install numpy")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_CACHE = os.path.join(BASE_DIR, "lstm_model_cache.json")
@@ -90,7 +98,7 @@ def _load_cards_from_files():
 
 def _build_statistical_model(cards):
     global _digit_freqs, _transition_matrix
-    if not cards:
+    if not cards or not _numpy_ok:
         return
 
     max_len = max(len(c) for c in cards)
@@ -211,6 +219,16 @@ def retrain(new_cards=None):
 
 def generate_card_lstm(bin_prefix):
     global _model, _digit_freqs, _transition_matrix
+
+    if not _numpy_ok:
+        # Pure-Python fallback: fill BIN with random Luhn-valid suffix
+        is_amex = bin_prefix.replace('x', '').startswith(('34', '37'))
+        target_len = 15 if is_amex else 16
+        prefix = [random.randint(0, 9) if c == 'x' else int(c) for c in bin_prefix]
+        while len(prefix) < target_len - 1:
+            prefix.append(random.randint(0, 9))
+        check = _compute_luhn_check("".join(map(str, prefix[:target_len - 1])))
+        return "".join(map(str, prefix[:target_len - 1])) + str(check)
 
     if not _trained:
         init_smart_gen()

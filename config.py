@@ -215,6 +215,63 @@ def is_captcha_enabled():
     return True
 
 MAX_CONFIGS = 10
+_GATE_CONFIG_FILE = os.path.join(BASE_DIR, 'gate_configs.json')
+_REDEEM_KEYS_FILE = os.path.join(BASE_DIR, 'redeem_keys.json')
+
+
+def _save_gate_configs():
+    try:
+        data = {
+            "configs": {str(k): v for k, v in _gate_configs.items()},
+            "active": _active_config_id,
+            "next_id": _next_config_id,
+            "parallel": _parallel_enabled,
+        }
+        with open(_GATE_CONFIG_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save gate configs: {e}")
+
+
+def _load_gate_configs():
+    global _gate_configs, _active_config_id, _next_config_id, _parallel_enabled
+    if not os.path.exists(_GATE_CONFIG_FILE):
+        return
+    try:
+        with open(_GATE_CONFIG_FILE, 'r') as f:
+            data = json.load(f)
+        loaded = {int(k): v for k, v in data.get("configs", {}).items()}
+        if loaded:
+            for cfg in loaded.values():
+                cfg.setdefault("stats", {"checked": 0, "live": 0, "dead": 0, "errors": 0, "charged": 0})
+            _gate_configs = loaded
+            _active_config_id = data.get("active", list(loaded.keys())[0])
+            if _active_config_id not in _gate_configs:
+                _active_config_id = list(_gate_configs.keys())[0]
+            _next_config_id = data.get("next_id", max(loaded.keys()) + 1)
+            _parallel_enabled = data.get("parallel", False)
+            logger.info(f"Loaded {len(loaded)} gate configs from disk")
+    except Exception as e:
+        logger.warning(f"Failed to load gate configs: {e}")
+
+
+def _save_redeem_keys():
+    try:
+        with open(_REDEEM_KEYS_FILE, 'w') as f:
+            json.dump(_redeem_keys, f, indent=2)
+    except Exception:
+        pass
+
+
+def _load_redeem_keys():
+    global _redeem_keys
+    try:
+        if os.path.exists(_REDEEM_KEYS_FILE):
+            with open(_REDEEM_KEYS_FILE, 'r') as f:
+                _redeem_keys = json.load(f)
+    except Exception:
+        _redeem_keys = {}
+
 
 _gate_configs = {
     1: {
@@ -285,6 +342,7 @@ def set_active_config(config_id):
         gt = _gate_configs[config_id].get("gate_type", "stripe")
         GATE_SETTINGS[gt] = _gate_configs[config_id]["settings"]
         GATE_ENABLED[gt] = _gate_configs[config_id]["enabled"]
+        _save_gate_configs()
         return True
     return False
 
@@ -305,6 +363,7 @@ def create_config(name="", from_url="", gate_type="stripe"):
         "enabled": False,
         "stats": {"checked": 0, "live": 0, "dead": 0, "errors": 0, "charged": 0},
     }
+    _save_gate_configs()
     return cid, "OK"
 
 
@@ -339,6 +398,7 @@ def delete_config(config_id):
         gt = _gate_configs[_active_config_id].get("gate_type", "stripe")
         GATE_SETTINGS[gt] = _gate_configs[_active_config_id]["settings"]
         GATE_ENABLED[gt] = _gate_configs[_active_config_id]["enabled"]
+    _save_gate_configs()
     return True, "OK"
 
 
@@ -348,6 +408,7 @@ def enable_config(config_id):
         if config_id == _active_config_id:
             gt = _gate_configs[config_id].get("gate_type", "stripe")
             GATE_ENABLED[gt] = True
+        _save_gate_configs()
         return True
     return False
 
@@ -358,6 +419,7 @@ def disable_config(config_id):
         if config_id == _active_config_id:
             gt = _gate_configs[config_id].get("gate_type", "stripe")
             GATE_ENABLED[gt] = False
+        _save_gate_configs()
         return True
     return False
 
@@ -370,6 +432,7 @@ def set_config_setting(config_id, key, value):
             if gt not in GATE_SETTINGS:
                 GATE_SETTINGS[gt] = {}
             GATE_SETTINGS[gt][key] = value
+        _save_gate_configs()
         return True
     return False
 
@@ -377,6 +440,7 @@ def set_config_setting(config_id, key, value):
 def set_config_name(config_id, name):
     if config_id in _gate_configs:
         _gate_configs[config_id]["name"] = name
+        _save_gate_configs()
         return True
     return False
 
@@ -403,6 +467,7 @@ def is_parallel_enabled():
 def set_parallel_enabled(enabled):
     global _parallel_enabled
     _parallel_enabled = enabled
+    _save_gate_configs()
 
 
 def config_count():
@@ -423,6 +488,7 @@ def generate_redeem_key(days):
         "used_by": None,
         "used_at": None,
     }
+    _save_redeem_keys()
     return key, "OK"
 
 
@@ -436,6 +502,7 @@ def redeem_key(key, user_id):
         return False, "Key expired"
     kd["used_by"] = user_id
     kd["used_at"] = int(time.time())
+    _save_redeem_keys()
     return True, kd["days"]
 
 
@@ -446,6 +513,7 @@ def get_all_redeem_keys():
 def revoke_redeem_key(key):
     if key in _redeem_keys:
         del _redeem_keys[key]
+        _save_redeem_keys()
         return True
     return False
 
@@ -465,6 +533,8 @@ def cleanup_expired_keys():
     expired = [k for k, v in _redeem_keys.items() if now > v["expiry"]]
     for k in expired:
         del _redeem_keys[k]
+    if expired:
+        _save_redeem_keys()
     return len(expired)
 
 
@@ -489,8 +559,6 @@ def _save_admins():
     except Exception:
         pass
 
-
-_load_admins()
 
 
 def add_admin(identifier, label=""):
@@ -920,6 +988,7 @@ def import_config_data(data, target_config_id=None):
         if target_config_id == _active_config_id:
             GATE_SETTINGS[gate_type] = cfg["settings"]
             GATE_ENABLED[gate_type] = cfg["enabled"]
+        _save_gate_configs()
         return True, f"Applied to Config #{target_config_id}"
     else:
         cid, msg = create_config(name=name, gate_type=gate_type)
@@ -927,7 +996,19 @@ def import_config_data(data, target_config_id=None):
             return False, msg
         _gate_configs[cid]["settings"] = copy.deepcopy(settings)
         _gate_configs[cid]["enabled"] = enabled
+        _save_gate_configs()
         return True, f"Created Config #{cid} ({name})"
 
+
+# Load persisted state on startup (overrides in-memory defaults if file exists)
+_load_gate_configs()
+_load_redeem_keys()
+_load_admins()
+
+# Sync active config into GATE_SETTINGS/GATE_ENABLED after load
+if _active_config_id in _gate_configs:
+    _active_gt = _gate_configs[_active_config_id].get("gate_type", "stripe")
+    GATE_SETTINGS[_active_gt] = _gate_configs[_active_config_id]["settings"]
+    GATE_ENABLED[_active_gt] = _gate_configs[_active_config_id]["enabled"]
 
 load_proxies()
