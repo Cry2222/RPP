@@ -1392,6 +1392,45 @@ def detect_gate_type(full_url):
             scores["braintree_auth"] += 2
             result["signals"].append(f"merchant: {merchant_match.group(1)}")
 
+        # Deep JS scan: catches keys/tokens buried in webpack/Next.js bundles
+        try:
+            from jsrecon import jsrecon_scan as _jsr
+            _jf = _jsr(base_url)
+            if _jf:
+                if _jf["stripe_keys"]:
+                    result["detected_keys"].setdefault("stripe_pub_key", _jf["stripe_keys"][0])
+                    scores["stripe"] += 2
+                    scores["stripe_auth"] += 2
+                    scores["stripe_intent"] += 2
+                    result["signals"].append(f"JS-Recon stripe key: {_jf['stripe_keys'][0][:20]}...")
+                if _jf["stripe_accounts"]:
+                    result["detected_keys"].setdefault("stripe_account", _jf["stripe_accounts"][0])
+                    scores["stripe"] += 1
+                    result["signals"].append("JS-Recon stripe account")
+                if _jf["merchant_ids"]:
+                    result["detected_keys"].setdefault("merchant_id", _jf["merchant_ids"][0])
+                    scores["braintree"] += 3
+                    scores["braintree_auth"] += 3
+                    result["signals"].append(f"JS-Recon merchant: {_jf['merchant_ids'][0]}")
+                if _jf["bt_client_tokens"]:
+                    scores["braintree"] += 2
+                    result["signals"].append("JS-Recon BT client token")
+                _sigs = set(_jf.get("wc_signals", []))
+                if "wc_stripe_frontend_request" in _sigs or "setup-intent" in _sigs or "setup_intent" in _sigs:
+                    scores["stripe_intent"] += 4
+                    result["signals"].append("JS-Recon setup intent")
+                if "wc_stripe_create_setup_intent" in _sigs or "add_card_nonce" in _sigs:
+                    scores["stripe_auth"] += 4
+                    result["signals"].append("JS-Recon stripe auth")
+                if "wc_braintree_client_token" in _sigs:
+                    scores["braintree_auth"] += 4
+                    result["signals"].append("JS-Recon braintree auth")
+                if "_charitable_donation_nonce" in _sigs or "charitable_form_id" in _sigs:
+                    scores["stripe"] += 5
+                    result["signals"].append("JS-Recon charitable form")
+        except Exception:
+            pass
+
         best_type = max(scores, key=scores.get)
         best_score = scores[best_type]
 
@@ -1551,6 +1590,35 @@ def setup_gate_from_url(full_url):
             new_settings["stripe_account"] = acct_id
             results["stripe_account"] = acct_id
             results["auto_detected"].append(f"Stripe account: {acct_id}")
+
+        # Deep JS scan: recovers keys/accounts from bundled JS files
+        try:
+            from jsrecon import jsrecon_scan as _jsr
+            _jf = _jsr(site_url)
+            if _jf:
+                if not new_settings.get("pub_key") and _jf["stripe_keys"]:
+                    _pk = _jf["stripe_keys"][0]
+                    new_settings["pub_key"] = _pk
+                    results["stripe_key"] = _pk[:25] + "..."
+                    results["auto_detected"].append(f"JS-Recon Stripe key: {_pk[:20]}...")
+                if not new_settings.get("stripe_account") and _jf["stripe_accounts"]:
+                    _acct = _jf["stripe_accounts"][0]
+                    new_settings["stripe_account"] = _acct
+                    results["stripe_account"] = _acct
+                    results["auto_detected"].append(f"JS-Recon Stripe account: {_acct}")
+                if not results.get("form_found") and "_charitable_donation_nonce" in _jf.get("wc_signals", []):
+                    results["form_found"] = True
+                    results["auto_detected"].append("JS-Recon charitable form signals found")
+                for _dp in _jf.get("donate_paths", []):
+                    if _dp and _dp != donate_path:
+                        results["auto_detected"].append(f"JS-Recon alt donate path: {_dp}")
+                if _jf["wc_signals"]:
+                    results["auto_detected"].append(f"JS-Recon WC: {', '.join(_jf['wc_signals'][:4])}")
+        except Exception:
+            pass
+
+        # Re-read pk in case js-recon just filled it
+        pk = new_settings.get("pub_key") or pk
 
         captcha_info = detect_captcha(page_html, f"{site_url}{donate_path}")
         if captcha_info["detected"]:

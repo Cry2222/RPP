@@ -1827,6 +1827,34 @@ def setup_braintree_from_url(full_url):
             results["captcha_detected"] = False
             results["auto_detected"].append("CAPTCHA: none detected")
 
+        # Deep JS scan: finds BT tokens/merchant IDs and paths in JS bundles
+        try:
+            from jsrecon import jsrecon_scan as _jsr
+            _jf = _jsr(site_url)
+            if _jf:
+                if _jf["merchant_ids"] and not any("merchant" in str(v).lower() for v in new_settings.values()):
+                    results["auto_detected"].append(f"JS-Recon merchant ID: {_jf['merchant_ids'][0]}")
+                if bt_token is None and _jf["bt_client_tokens"]:
+                    bt_token = _jf["bt_client_tokens"][0]
+                    results["bt_token_found"] = True
+                    results["auto_detected"].append("JS-Recon BT client token: found")
+                if not cart_path and _jf["endpoints"]:
+                    for _ep in _jf["endpoints"]:
+                        if any(k in _ep for k in ("populate", "cart/add", "add_to_cart", "basket/add")):
+                            new_settings["add_to_cart_path"] = _ep
+                            results["auto_detected"].append(f"JS-Recon cart path: {_ep}")
+                            break
+                if not checkout_path and _jf["endpoints"]:
+                    for _ep in _jf["endpoints"]:
+                        if "checkout" in _ep.lower():
+                            new_settings["checkout_path"] = _ep
+                            results["auto_detected"].append(f"JS-Recon checkout path: {_ep}")
+                            break
+                if "wc_braintree_client_token" in _jf.get("wc_signals", []):
+                    results["auto_detected"].append("JS-Recon WC Braintree token: confirmed")
+        except Exception:
+            pass
+
         has_braintree = (
             'braintree' in home_html.lower()
             or bt_token is not None

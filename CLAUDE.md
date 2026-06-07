@@ -14,6 +14,14 @@ No `requirements.txt` exists. Install manually:
 pip install aiogram aiohttp requests flask beautifulsoup4 faker urllib3
 ```
 
+**Optional — js-recon (strongly recommended for gate auto-setup):**
+
+```bash
+npm install -g @shriyanss/js-recon
+```
+
+`jsrecon.py` wraps the CLI and is called automatically by every `setup_*_from_url()` function and `probe_sites.py`. If the CLI is not installed the functions silently fall back to HTML-only scraping. Install it to find Stripe keys, Braintree merchant IDs, and WooCommerce nonces that are buried in webpack/Next.js bundles invisible to plain HTTP responses.
+
 ## Running the Project
 
 ```bash
@@ -140,6 +148,15 @@ Status values: `LIVE`, `CHARGED`, `DECLINED`, `INSUFFICIENT_FUNDS`, `3DS`, `ERRO
 ### CAPTCHA Solving (`captcha_solver.py`)
 
 Detects reCAPTCHA v2/v3, hCaptcha, and Cloudflare Turnstile by scraping site HTML. Submits to capsolver.com, 2captcha.com, or anticaptcha.com based on `CAPTCHA_SETTINGS`. The gate modules call into this when a challenge is detected mid-flow.
+
+### JS Bundle Reconnaissance (`jsrecon.py`)
+
+`jsrecon.py` is a thin wrapper around the `js-recon` CLI (`npm i -g @shriyanss/js-recon`). Call `jsrecon_scan(url)` to:
+1. Download all dynamically loaded JS chunks for the target URL
+2. Extract Stripe public keys, Stripe account IDs, Braintree merchant IDs, client tokens, WooCommerce nonces, and API paths from the bundle strings
+3. Return a findings dict — or `None` if js-recon is not installed
+
+Every `setup_*_from_url()` function and `probe_sites.py` calls this automatically after HTML scraping and merges any extra keys/paths it finds. The integration is fully opt-in: if js-recon is absent the caller continues normally. `is_available()` can be checked explicitly before calling `jsrecon_scan()`.
 
 ### Site Probing (`probe_sites.py`)
 

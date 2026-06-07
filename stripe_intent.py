@@ -387,6 +387,28 @@ def setup_stripe_intent_from_url(full_url):
             except Exception:
                 continue
 
+        # Deep JS scan: recovers keys and setup-intent signals from JS bundles
+        try:
+            from jsrecon import jsrecon_scan as _jsr
+            _jf = _jsr(site_url)
+            if _jf:
+                if not new_settings.get("stripe_pub_key") and _jf["stripe_keys"]:
+                    _pk = _jf["stripe_keys"][0]
+                    new_settings["stripe_pub_key"] = _pk
+                    results["auto_detected"].append(f"JS-Recon Stripe key: {_pk[:25]}...")
+                if not new_settings.get("account_path") and _jf["account_paths"]:
+                    _ap = _jf["account_paths"][0]
+                    new_settings["account_path"] = _ap
+                    _set_gs("stripe_intent", "account_path", _ap)
+                    results["auto_detected"].append(f"JS-Recon account path: {_ap}")
+                _sigs = set(_jf.get("wc_signals", []))
+                if "wc_stripe_frontend_request" in _sigs or "setup-intent" in _sigs or "setup_intent" in _sigs:
+                    results["auto_detected"].append("JS-Recon setup intent endpoint: confirmed")
+                if _sigs:
+                    results["auto_detected"].append(f"JS-Recon WC: {', '.join(list(_sigs)[:4])}")
+        except Exception:
+            pass
+
         has_key = "stripe_pub_key" in new_settings
         if has_key:
             results["success"] = True
