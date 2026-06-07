@@ -478,8 +478,9 @@ def fmt_chk_live(card_str, cc, bin_info, gate_name, detail, proxy, tag="LIVE", c
     # Extract IP/Address info for telegram
     address_info = bin_info.get('country_name', 'GLOBAL')
     ip_info = "N/A"
-    if proxy and ':' in proxy:
-        ip_info = proxy.split(':')[0]
+    if proxy:
+        _proxy_clean = proxy.split('://', 1)[-1] if '://' in proxy else proxy
+        ip_info = _proxy_clean.split(':')[0] if ':' in _proxy_clean else _proxy_clean
 
     return (
         f"{charge_icon} <b>H@0 ━ {auth_type}</b>\n"
@@ -517,8 +518,9 @@ def fmt_chk_dead(card_str, cc, bin_info, gate_name, detail, proxy, check_time=No
     # Extract IP/Address info for telegram
     address_info = bin_info.get('country_name', 'GLOBAL')
     ip_info = "N/A"
-    if proxy and ':' in proxy:
-        ip_info = proxy.split(':')[0]
+    if proxy:
+        _proxy_clean = proxy.split('://', 1)[-1] if '://' in proxy else proxy
+        ip_info = _proxy_clean.split(':')[0] if ':' in _proxy_clean else _proxy_clean
 
     return (
         f"❌ <b>H@0 ━ DECLINED</b>\n"
@@ -750,9 +752,14 @@ class CCCrawler:
             t0 = time.time()
             active_cfg = get_config(get_active_config_id())
             settings = active_cfg.get("settings", {}) if active_cfg else {}
+            site_url = settings.get("site_url", "").strip()
+            stripe_pub_key = settings.get("stripe_pub_key", "").strip()
+            if not site_url:
+                self._gate_errors += 1
+                return False, "ERROR", "Stripe Auth not configured — use /autosetup [url] or /setconfig", "Stripe Auth", 0.0
             result = await loop.run_in_executor(
                 None, check_stripe_auth, cc, mes, ano, cvv,
-                settings.get("site_url"), settings.get("stripe_pub_key")
+                site_url, stripe_pub_key or None
             )
             elapsed = time.time() - t0
             status = result.get('status', 'declined')
@@ -779,9 +786,14 @@ class CCCrawler:
             t0 = time.time()
             active_cfg = get_config(get_active_config_id())
             settings = active_cfg.get("settings", {}) if active_cfg else {}
+            site_url = settings.get("site_url", "").strip()
+            stripe_pub_key = settings.get("stripe_pub_key", "").strip()
+            if not site_url:
+                self._gate_errors += 1
+                return False, "ERROR", "Stripe Intent not configured — use /autosetup [url] or /setconfig", "Stripe Intent", 0.0
             result = await loop.run_in_executor(
                 None, check_stripe_intent, cc, mes, ano, cvv,
-                settings.get("site_url"), settings.get("stripe_pub_key")
+                site_url, stripe_pub_key or None
             )
             elapsed = time.time() - t0
             status = result.get('status', 'declined')
@@ -808,10 +820,16 @@ class CCCrawler:
             t0 = time.time()
             active_cfg = get_config(get_active_config_id())
             settings = active_cfg.get("settings", {}) if active_cfg else {}
+            site_url = settings.get("site_url", "").strip()
+            login_email = settings.get("login_email", "").strip()
+            login_password = settings.get("login_password", "").strip()
+            merchant_id = settings.get("merchant_id", "").strip()
+            if not site_url or not login_email or not login_password:
+                self._gate_errors += 1
+                return False, "ERROR", "Braintree Auth not configured — set email/password via /setconfig", "Braintree Auth", 0.0
             result = await loop.run_in_executor(
                 None, check_braintree_auth, cc, mes, ano, cvv,
-                settings.get("site_url"), settings.get("login_email"),
-                settings.get("login_password"), settings.get("merchant_id")
+                site_url, login_email, login_password, merchant_id or None
             )
             elapsed = time.time() - t0
             status = result.get('status', 'declined')
@@ -845,9 +863,12 @@ class CCCrawler:
             bt_rl = get_bt_rate_limiter()
             bt_stats = bt_rl.get_stats()
             if bt_stats.get('is_banned'):
-                logger.warning("BT rate limiter: API is banned, waiting...")
-                while bt_rl.get_stats().get('is_banned'):
+                logger.warning("BT rate limiter: API is banned, waiting up to 120s...")
+                _ban_deadline = time.time() + 120
+                while bt_rl.get_stats().get('is_banned') and time.time() < _ban_deadline:
                     await asyncio.sleep(5)
+                if bt_rl.get_stats().get('is_banned'):
+                    logger.warning("BT ban wait exceeded 120s, proceeding")
 
             is_live, tag, detail, gate_name, check_time = await self.check_braintree_gate(card_str)
             proxy_used = getattr(self, '_last_bt_proxy', None)
@@ -881,9 +902,12 @@ class CCCrawler:
             rl = get_rate_limiter()
             rl_stats = rl.get_stats()
             if rl_stats.get('is_banned'):
-                logger.warning("Rate limiter: API is banned, waiting...")
-                while rl.get_stats().get('is_banned'):
+                logger.warning("Rate limiter: API is banned, waiting up to 120s...")
+                _ban_deadline = time.time() + 120
+                while rl.get_stats().get('is_banned') and time.time() < _ban_deadline:
                     await asyncio.sleep(5)
+                if rl.get_stats().get('is_banned'):
+                    logger.warning("Stripe ban wait exceeded 120s, proceeding")
 
             is_live, tag, detail, gate_name, check_time = await self.check_stripe(card_str)
 
@@ -2289,7 +2313,7 @@ def register_handlers(dp):
         brand = get_card_brand(cc[:6])
 
         active_gt = get_config_gate_type(get_active_config_id())
-        gate_display = "Braintree" if active_gt == "braintree" else "Stripe Charitable"
+        gate_display = GATE_TYPE_LABELS.get(active_gt, "Stripe Charitable")
 
         await message.reply(
             f"<b>⏳  CHECKING CARD...</b>\n"
@@ -2332,7 +2356,7 @@ def register_handlers(dp):
             else:
                 msg = fmt_chk_dead(card_str, cc, bin_info, gate_name, detail, proxy_display, check_time)
                 await message.reply(msg, parse_mode='HTML')
-                track_user_card(chk_uid, f"{card_str} | {detail}", "error")
+                track_user_card(chk_uid, f"{card_str} | {detail}", "dead")
 
         except Exception as e:
             logger.error(f"Check command error: {e}")
@@ -5546,6 +5570,10 @@ async def main_loop():
     crawler_instance = crawler
 
     register_handlers(dp)
+
+    expired_n = cleanup_expired_keys()
+    if expired_n:
+        logger.info(f"Cleaned up {expired_n} expired redeem keys")
 
     logger.info(f"Running initial proxy scrape + scrub... targeting {TARGET_LIVE} live proxies")
     await full_scrape_and_scrub()
