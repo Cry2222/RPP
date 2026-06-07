@@ -440,6 +440,31 @@ def setup_braintree_auth_from_url(full_url):
         if not bt_found:
             results["errors"].append("Braintree gateway not detected on site")
 
+        # Deep JS scan: merchant IDs and account paths buried in JS bundles
+        try:
+            from jsrecon import jsrecon_scan as _jsr
+            _jf = _jsr(site_url)
+            if _jf:
+                if "merchant_id" not in new_settings and _jf["merchant_ids"]:
+                    _mid = _jf["merchant_ids"][0]
+                    new_settings["merchant_id"] = _mid
+                    results["auto_detected"].append(f"JS-Recon merchant ID: {_mid}")
+                if not new_settings.get("account_path") and _jf["account_paths"]:
+                    _ap = _jf["account_paths"][0]
+                    new_settings["account_path"] = _ap
+                    results["auto_detected"].append(f"JS-Recon account path: {_ap}")
+                if not bt_found and _jf["bt_client_tokens"]:
+                    bt_found = True
+                    results["auto_detected"].append("JS-Recon BT client token: confirmed Braintree")
+                _sigs = set(_jf.get("wc_signals", []))
+                if "wc_braintree_client_token" in _sigs:
+                    bt_found = True
+                    results["auto_detected"].append("JS-Recon WC Braintree token: found")
+                if _sigs:
+                    results["auto_detected"].append(f"JS-Recon WC: {', '.join(list(_sigs)[:4])}")
+        except Exception:
+            pass
+
         has_merchant = "merchant_id" in new_settings
         if bt_found and has_merchant:
             results["success"] = True

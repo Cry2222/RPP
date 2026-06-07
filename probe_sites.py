@@ -8,6 +8,12 @@ import time
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.filterwarnings('ignore')
 
+try:
+    from jsrecon import jsrecon_scan as _jsrecon_scan, is_available as _jsrecon_available
+except ImportError:
+    _jsrecon_scan = None
+    _jsrecon_available = lambda: False
+
 SITES = [
     ("simplygreatdeals.co.uk", "/my-account-2/"),
     ("on8mil.com", "/my-account-2/"),
@@ -133,6 +139,40 @@ def probe_site(domain, hint_path=None):
     except Exception:
         pass
 
+    # Augment with js-recon: pulls keys/tokens from lazy-loaded JS bundles
+    if _jsrecon_scan and _jsrecon_available():
+        try:
+            jf = _jsrecon_scan(url, timeout=90)
+            if jf:
+                if jf["stripe_keys"] and not result["stripe_key"]:
+                    result["stripe_key"] = jf["stripe_keys"][0]
+                    result["stripe"] = True
+                    result.setdefault("jsrecon_signals", []).append(
+                        f"js-recon stripe key: {jf['stripe_keys'][0][:20]}...")
+                if jf["merchant_ids"] and not result["merchant_id"]:
+                    result["merchant_id"] = jf["merchant_ids"][0]
+                    result["braintree"] = True
+                    result.setdefault("jsrecon_signals", []).append(
+                        f"js-recon merchant: {jf['merchant_ids'][0]}")
+                if jf["bt_client_tokens"]:
+                    result["braintree"] = True
+                    result.setdefault("jsrecon_signals", []).append("js-recon BT token")
+                _sigs = set(jf.get("wc_signals", []))
+                if "add_card_nonce" in _sigs or "woocommerce-add-payment-method-nonce" in _sigs:
+                    result["add_pm"] = True
+                    result.setdefault("jsrecon_signals", []).append("js-recon add-PM nonce")
+                if "wc_stripe_frontend_request" in _sigs or "setup-intent" in _sigs or "setup_intent" in _sigs:
+                    result["setup_intent"] = True
+                    result.setdefault("jsrecon_signals", []).append("js-recon setup-intent")
+                if "_charitable_donation_nonce" in _sigs or "charitable_form_id" in _sigs:
+                    result.setdefault("jsrecon_signals", []).append("js-recon charitable form")
+                if not result.get("account_path") and jf["account_paths"]:
+                    result["account_path"] = jf["account_paths"][0]
+                    result.setdefault("jsrecon_signals", []).append(
+                        f"js-recon account path: {jf['account_paths'][0]}")
+        except Exception:
+            pass
+
     return result
 
 
@@ -177,6 +217,8 @@ def main():
         print(f"  Setup Intent: {r['setup_intent']} | Add PM: {r['add_pm']}")
         print(f"  CF: {r['cloudflare']}")
         print(f"  GATES: {gate_str}")
+        if r.get("jsrecon_signals"):
+            print(f"  JS-Recon: {'; '.join(r['jsrecon_signals'])}")
         if r["errors"]:
             print(f"  Errors: {'; '.join(r['errors'])}")
 
