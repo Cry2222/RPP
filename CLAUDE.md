@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **H@0 Checker V6.0** — a Telegram bot that validates credit cards against multiple payment gateways (Stripe, Braintree). It runs as a Flask web server on port 5000 that spawns the Telegram bot in a background thread. Access is controlled via Telegram user IDs and a redeem-key system.
 
+## Dependencies
+
+No `requirements.txt` exists. Install manually:
+
+```bash
+pip install aiogram aiohttp requests flask beautifulsoup4 faker urllib3
+```
+
 ## Running the Project
 
 ```bash
@@ -17,6 +25,9 @@ python main.py
 
 # Test individual gate implementations against cards in approved.txt
 python test_gates.py
+
+# Scan sites in SITES list for which gate types they support
+python probe_sites.py
 ```
 
 There is no build step. The project runs directly with Python.
@@ -55,13 +66,15 @@ python test_gates.py
 
 Each payment processor is an independent module. The active configuration determines which gate function is called:
 
-| Gate type key | Module | Checker function |
-|---|---|---|
-| `stripe` | `stripe.py` | `check_stripe()` |
-| `stripe_auth` | `stripe_auth.py` | `check_stripe_auth()` |
-| `stripe_intent` | `stripe_intent.py` | `check_stripe_intent()` |
-| `braintree` | `braintree_gate.py` | `check_braintree()` |
-| `braintree_auth` | `braintree_auth.py` | `check_braintree_auth()` |
+| Gate type key | Module | Checker function | Auto-setup function |
+|---|---|---|---|
+| `stripe` | `stripe.py` | `check_stripe()` | `setup_gate_from_url()` |
+| `stripe_auth` | `stripe_auth.py` | `check_stripe_auth()` | `setup_stripe_auth_from_url()` |
+| `stripe_intent` | `stripe_intent.py` | `check_stripe_intent()` | `setup_stripe_intent_from_url()` |
+| `braintree` | `braintree_gate.py` | `check_braintree()` | `setup_braintree_from_url()` |
+| `braintree_auth` | `braintree_auth.py` | `check_braintree_auth()` | `setup_braintree_auth_from_url()` |
+
+Each `setup_*_from_url()` function fetches the target site, scrapes keys/paths/tokens, and writes the result into the active gate config automatically. `stripe.py` also exports `detect_gate_type(url)` which scores a URL against all five gate types and returns the best match — call this before `setup_gate_from_url()` when the gate type is unknown.
 
 `hybrid_stripe.py` and `hybrid_braintree.py` wrap their respective gates in a multi-config parallel mode toggled by the `hybrid_mode` flag in a gate config.
 
@@ -77,12 +90,33 @@ All runtime state lives in module-level dicts in `config.py` and is persisted to
 
 `config.py` exports ~60 functions that `main.py` imports directly (no class instantiation).
 
+**Gate config field schemas** (what each gate type stores):
+
+| Field | Stripe | Braintree | Stripe Auth/Intent | Braintree Auth |
+|---|---|---|---|---|
+| `site_url` | ✓ | ✓ | ✓ | ✓ |
+| `donate_path` | ✓ | — | — | — |
+| `pub_key` / `stripe_pub_key` | ✓ | — | ✓ | — |
+| `campaign_id`, `stripe_account` | ✓ | — | — | — |
+| `donation_amount`, `random_amount` | ✓ | — | — | — |
+| `add_to_cart_path`, `checkout_path` | — | ✓ | — | — |
+| `product_payload`, `payment_method_id` | — | ✓ | — | — |
+| `account_path` | — | — | ✓ | ✓ |
+| `login_email`, `login_password`, `merchant_id` | — | — | — | ✓ |
+| `hybrid_mode` | ✓ | ✓ | — | — |
+
+**Parallel mode** — when enabled via `set_parallel_enabled(True)`, `main.py` calls `get_enabled_configs()` to retrieve all active configs and fans card checks out across them concurrently. Toggle with `is_parallel_enabled()` / `set_parallel_enabled()`.
+
 ### Proxy Management (`proxy_scraper.py`)
 
 - Scrapes ~24 public proxy sources asynchronously.
 - Validates live proxies concurrently; keeps a minimum of `TARGET_LIVE = 15` in `proxies_live.txt`.
 - `auto_scrub_loop()` runs as a background task, refilling when pool drops below `REFILL_THRESHOLD`.
 - Dead proxies are removed via `remove_dead_proxy()` after failed requests in gate modules.
+
+### Navigating `main.py`
+
+`main.py` is ~6,500 lines. Do not read it linearly — use `Grep` to find handlers by command name (e.g. `grep "commands=\['check'\]"`) or callback prefix (e.g. `grep "gate_"`). All Telegram command handlers are registered via `@dp.message_handler(commands=[...])` and all button callbacks via `@dp.callback_query_handler()`.
 
 ### aiogram v2/v3 Compatibility (`main.py:26–63`)
 
@@ -106,6 +140,16 @@ Status values: `LIVE`, `CHARGED`, `DECLINED`, `INSUFFICIENT_FUNDS`, `3DS`, `ERRO
 ### CAPTCHA Solving (`captcha_solver.py`)
 
 Detects reCAPTCHA v2/v3, hCaptcha, and Cloudflare Turnstile by scraping site HTML. Submits to capsolver.com, 2captcha.com, or anticaptcha.com based on `CAPTCHA_SETTINGS`. The gate modules call into this when a challenge is detected mid-flow.
+
+### Site Probing (`probe_sites.py`)
+
+`probe_sites.py` is a standalone diagnostic script. Given the `SITES` list of domains, `probe_site(domain)` fetches the homepage, account page, checkout, and payment-method pages, then detects:
+- Whether the site runs WooCommerce
+- Whether Stripe or Braintree is present (extracts `pk_live_*` keys and merchant IDs)
+- Whether add-payment-method (`stripe_auth`) or setup-intent (`stripe_intent`) flows are available
+- Whether Cloudflare blocks the site
+
+Run `python probe_sites.py` to get a summary table of which gate types each site supports — use this to populate `STRIPE_WC_SITE_POOL` / `BRAINTREE_WC_SITE_POOL` in `config.py`.
 
 ### Smart Card Generation (`smart_gen.py`)
 
