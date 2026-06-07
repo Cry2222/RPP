@@ -34,7 +34,7 @@ TELEGRAM_ADMIN = os.environ.get('TELEGRAM_ADMIN', '').strip() or 'PASTE_YOUR_ADM
 STRIPE_PUB_KEY = os.environ.get('STRIPE_PUB_KEY', '').strip()
 
 _DEFAULT_GATE = {
-    "site_url": "https://pipelineforchangefoundation.com",
+    "site_url": "https://simplygreatdeals.co.uk",
     "donate_path": "/donate/",
     "campaign_id": "",
     "pub_key": "",

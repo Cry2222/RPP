@@ -142,6 +142,13 @@ def _get_provider():
     return get_captcha_setting("provider", "capsolver")
 
 
+def _get_fallback_providers(primary=None):
+    """Return all configured providers with primary first."""
+    if primary is None:
+        primary = _get_provider()
+    return [primary] + [p for p in PROVIDERS if p != primary]
+
+
 def _extract_cf_sitekey(html):
     for pat in _SITEKEY_PATTERNS["turnstile"]:
         m = re.search(pat, html, re.IGNORECASE)
@@ -375,7 +382,32 @@ def solve_captcha(captcha_type, sitekey, page_url, provider="capsolver", api_key
         return {"success": False, "token": None, "error": str(e)[:80]}
 
 
-def _build_task(captcha_type, sitekey, page_url, action=None, proxy=None, provider="capsolver"):
+def solve_captcha_with_fallback(captcha_type, sitekey, page_url, action=None, proxy=None,
+                                timeout=120, max_wait=180):
+    """Try all configured providers in order, return first success."""
+    api_key = _get_api_key()
+    if not api_key:
+        return {"success": False, "token": None, "error": "No solver API key"}
+
+    providers = _get_fallback_providers()
+    last_error = "No providers configured"
+
+    for provider in providers:
+        result = solve_captcha(
+            captcha_type=captcha_type, sitekey=sitekey, page_url=page_url,
+            provider=provider, api_key=api_key, timeout=timeout, max_wait=max_wait,
+            action=action, proxy=proxy,
+        )
+        if result["success"]:
+            return result
+        last_error = result.get("error", "Unknown error")
+        logger.warning(f"Provider {provider} failed ({last_error}), trying next...")
+
+    return {"success": False, "token": None, "error": last_error}
+
+
+def _build_task(captcha_type, sitekey, page_url, action=None, proxy=None, provider="capsolver",
+                is_cf_challenge=False):
     if captcha_type == "recaptcha_v2":
         task = {
             "type": "ReCaptchaV2TaskProxyLess" if not proxy else "ReCaptchaV2Task",
@@ -411,6 +443,16 @@ def _build_task(captcha_type, sitekey, page_url, action=None, proxy=None, provid
 
     elif captcha_type == "turnstile":
         if provider == "capsolver":
+            if is_cf_challenge and not sitekey:
+                # Cloudflare JS/PoW challenge — use AntiCloudflareTask (no sitekey needed)
+                task = {
+                    "type": "AntiCloudflareTask",
+                    "websiteURL": page_url,
+                    "proxy": _format_proxy(proxy).get("proxyAddress", "") if proxy else "",
+                }
+                if proxy:
+                    task.update(_format_proxy(proxy))
+                return task
             task = {
                 "type": "AntiTurnstileTaskProxyLess" if not proxy else "AntiTurnstileTask",
                 "websiteURL": page_url,
@@ -524,6 +566,46 @@ def _submit_cf_clearance(session, page_url, token, html=""):
 
 
 def _free_cf_bypass(session, page_url, max_retries=3):
+    # 1. Try cloudscraper — handles CF JS challenge automatically
+    try:
+        import cloudscraper
+        cs = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "mobile": False}
+        )
+        if hasattr(session, 'cookies'):
+            try:
+                cs.cookies.update(dict(session.cookies))
+            except Exception:
+                pass
+        r = cs.get(page_url, timeout=20)
+        if r.status_code == 200 and not is_cf_challenge(r.text):
+            if hasattr(session, 'cookies'):
+                try:
+                    session.cookies.update(dict(cs.cookies))
+                except Exception:
+                    pass
+            _stats["bypassed"] += 1
+            logger.info("CF bypass via cloudscraper OK")
+            return r.text, cs.headers.get("User-Agent", _BYPASS_USER_AGENTS[0])
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.debug(f"cloudscraper CF bypass failed: {str(e)[:60]}")
+
+    # 2. Try curl_cffi — Chrome TLS fingerprint bypasses bot detection
+    try:
+        from curl_cffi import requests as curl_req
+        curl_resp = curl_req.get(page_url, impersonate="chrome110", timeout=20, verify=False)
+        if curl_resp.status_code == 200 and not is_cf_challenge(curl_resp.text):
+            _stats["bypassed"] += 1
+            logger.info("CF bypass via curl_cffi OK")
+            return curl_resp.text, "curl_cffi/chrome110"
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.debug(f"curl_cffi CF bypass failed: {str(e)[:60]}")
+
+    # 3. UA rotation fallback with proper browser headers
     for attempt in range(max_retries):
         ua = random.choice(_BYPASS_USER_AGENTS)
         session.headers['user-agent'] = ua
@@ -552,7 +634,7 @@ def _free_cf_bypass(session, page_url, max_retries=3):
 
             time.sleep(0.2 + random.random() * 0.3)
 
-            r = session.get(page_url, timeout=12, verify=False, allow_redirects=True)
+            r = session.get(page_url, timeout=15, verify=False, allow_redirects=True)
             if r.status_code == 200 and not is_cf_challenge(r.text):
                 logger.info(f"CF bypass success on attempt {attempt+1} with UA rotation")
                 _stats["bypassed"] += 1
@@ -643,16 +725,15 @@ def auto_solve_page(html, page_url, provider=None, api_key=None,
             "is_cf_challenge": is_cf,
         }
 
-    result = solve_captcha(
+    # Use fallback-aware solver: tries primary provider then falls back to others
+    result = solve_captcha_with_fallback(
         captcha_type=captcha_type,
         sitekey=sitekey,
         page_url=page_url,
-        provider=provider,
-        api_key=api_key,
-        timeout=timeout,
-        max_wait=max_wait,
         action=detection.get("action"),
         proxy=proxy,
+        timeout=timeout,
+        max_wait=max_wait,
     )
 
     cleared_html = None

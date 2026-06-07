@@ -42,22 +42,30 @@ PROXY_FILE = os.path.join(BASE_DIR, "proxies.txt")
 SCRUBBED_FILE = os.path.join(BASE_DIR, "proxies_live.txt")
 
 TEST_URLS = [
-    "https://httpbin.org/ip",
+    # HTTPS endpoints
     "https://api.ipify.org?format=json",
-    "https://ifconfig.me/ip",
+    "https://api64.ipify.org?format=json",
     "https://icanhazip.com",
+    "https://ipv4.icanhazip.com",
     "https://checkip.amazonaws.com",
     "https://api.my-ip.io/v2/ip.txt",
     "https://ipinfo.io/ip",
-    "https://api64.ipify.org?format=json",
+    "https://httpbin.org/ip",
+    "https://ifconfig.me/ip",
+    # HTTP fallbacks — no TLS overhead, faster on mobile/Termux
+    "http://api.ipify.org?format=json",
+    "http://icanhazip.com",
+    "http://checkip.amazonaws.com",
+    "http://ip-api.com/json",
+    "http://ipv4.icanhazip.com",
 ]
 
 TARGET_LIVE = 15
 REFILL_THRESHOLD = 5
 MAX_WORKERS = 1500
 SCRUB_BATCH_SIZE = 3000
-TEST_TIMEOUT = 3
-MAX_LATENCY_MS = 3000
+TEST_TIMEOUT = 8      # bumped from 3 → 8 for mobile/Termux networks
+MAX_LATENCY_MS = 8000 # matches TEST_TIMEOUT
 
 _scrubbed_proxies = []
 _proxy_latencies = {}
@@ -217,7 +225,8 @@ async def _scrub_batch_fast(proxies, target_needed, existing_live_set=None):
     connector = TCPConnector(limit=0, ssl=False, enable_cleanup_closed=True, force_close=True, ttl_dns_cache=60)
     timeout = ClientTimeout(total=TEST_TIMEOUT * 2, connect=TEST_TIMEOUT)
 
-    async with ClientSession(connector=connector, timeout=timeout) as session:
+    session = ClientSession(connector=connector, timeout=timeout)
+    try:
         for batch_start in range(0, len(proxies), SCRUB_BATCH_SIZE):
             if len(live) >= target_needed:
                 break
@@ -229,7 +238,10 @@ async def _scrub_batch_fast(proxies, target_needed, existing_live_set=None):
                 async with sem:
                     return await _test_proxy_with_session(session, p)
 
-            results = await asyncio.gather(*[_limited_test(p) for p in batch], return_exceptions=True)
+            try:
+                results = await asyncio.gather(*[_limited_test(p) for p in batch], return_exceptions=True)
+            except asyncio.CancelledError:
+                break
 
             for r in results:
                 if isinstance(r, tuple):
@@ -249,6 +261,13 @@ async def _scrub_batch_fast(proxies, target_needed, existing_live_set=None):
             if len(live) >= target_needed:
                 logger.info(f"Target reached ({len(live)}/{target_needed}) - stopping early")
                 break
+    except asyncio.CancelledError:
+        pass
+    finally:
+        if not session.closed:
+            await session.close()
+        if not connector.closed:
+            await connector.close()
 
     return live, dead_count
 
@@ -264,12 +283,17 @@ async def _verify_existing_fast(proxies):
     timeout = ClientTimeout(total=TEST_TIMEOUT + 1, connect=TEST_TIMEOUT)
     sem = asyncio.Semaphore(MAX_WORKERS)
 
-    async with ClientSession(connector=connector, timeout=timeout) as session:
+    session = ClientSession(connector=connector, timeout=timeout)
+    try:
         async def _test(p):
             async with sem:
                 return await _test_proxy_with_session(session, p, timeout_sec=TEST_TIMEOUT)
 
-        results = await asyncio.gather(*[_test(p) for p in proxies], return_exceptions=True)
+        try:
+            results = await asyncio.gather(*[_test(p) for p in proxies], return_exceptions=True)
+        except asyncio.CancelledError:
+            results = []
+
         for r in results:
             if isinstance(r, tuple):
                 proxy, is_live, latency = r
@@ -279,6 +303,13 @@ async def _verify_existing_fast(proxies):
                     removed += 1
             else:
                 removed += 1
+    except asyncio.CancelledError:
+        pass
+    finally:
+        if not session.closed:
+            await session.close()
+        if not connector.closed:
+            await connector.close()
 
     logger.info(f"Verified existing: {len(still_live)} alive, {removed} dead (tested {len(proxies)})")
     return still_live, removed
