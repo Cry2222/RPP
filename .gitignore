@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.env
+*.log
+proxies.txt
+proxies_live.txt
+gate_configs.json
+redeem_keys.json
+approved.txt
