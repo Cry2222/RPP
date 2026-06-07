@@ -322,6 +322,23 @@ _active_config_id = 1
 _parallel_enabled = True
 _next_config_id = 6
 
+# Per-config consecutive-block error counts — used to trigger auto-rotation
+_config_error_counts: dict = {}
+ROTATE_AFTER_ERRORS = 3
+
+
+def increment_config_error(config_id):
+    _config_error_counts[config_id] = _config_error_counts.get(config_id, 0) + 1
+    return _config_error_counts[config_id]
+
+
+def reset_config_errors(config_id):
+    _config_error_counts.pop(config_id, None)
+
+
+def get_config_error_count(config_id):
+    return _config_error_counts.get(config_id, 0)
+
 
 def get_config(config_id):
     return _gate_configs.get(config_id)

