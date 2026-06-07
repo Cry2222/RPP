@@ -27,10 +27,10 @@ logger = logging.getLogger(__name__)
 
 fake = Faker()
 
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip() or 'PASTE_YOUR_BOT_TOKEN_HERE'
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '').strip() or 'PASTE_YOUR_CHAT_ID_HERE'
-ADMIN_CODE = os.environ.get('ADMIN_CODE', '').strip() or 'PASTE_YOUR_ADMIN_ID_HERE'
-TELEGRAM_ADMIN = os.environ.get('TELEGRAM_ADMIN', '').strip() or 'PASTE_YOUR_ADMIN_ID_HERE'
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip() or '8205683249:AAGbFdjGaRo94rjL-jEATws3b60ugl4fwWs'
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '').strip() or '6306276507'
+ADMIN_CODE = os.environ.get('ADMIN_CODE', '').strip) or '6306276507'
+TELEGRAM_ADMIN = os.environ.get('TELEGRAM_ADMIN', '').strip() or '6306276507'
 STRIPE_PUB_KEY = os.environ.get('STRIPE_PUB_KEY', '').strip()
 
 _DEFAULT_GATE = {
